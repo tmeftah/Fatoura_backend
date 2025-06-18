@@ -20,6 +20,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Text,
+    Boolean,
     UniqueConstraint,
 )
 
@@ -83,7 +84,8 @@ class DBUser(Base):
     username = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String, nullable=False)
-    is_active = Column(Integer, default=0)
+    is_active = Column(Boolean, default=False)
+    is_superuser = Column(Boolean, default=False)
 
 
 class DBProduct(Base):
@@ -151,9 +153,30 @@ class DBCustomer(Base):
     invoices = relationship("DBInvoice", back_populates="customer")
 
 
+def create_default_superuser():
+    db = SessionLocal()
+    username = "admin"
+    email = "admin@tt.com"
+    password = "admin"  # CHANGE THIS IN PRODUCTION
+
+    existing = db.query(DBUser).filter(DBUser.username == username).first()
+    if not existing:
+        superuser = DBUser(
+            username=username,
+            email=email,
+            hashed_password=get_password_hash(password),
+            is_active=True,
+            is_superuser=True,
+        )
+        db.add(superuser)
+        db.commit()
+        print(f"Created default superuser: {username}/{password}")
+    db.close()
+
+
 Base.metadata.create_all(bind=engine)
 
-
+create_default_superuser()
 # --- Pydantic Models ---
 
 
@@ -168,6 +191,7 @@ class UserOut(BaseModel):
     username: str
     email: str
     is_active: bool
+    is_superuser: bool
 
     class Config:
         from_attributes = True
@@ -373,8 +397,31 @@ def login(
     user = get_user_by_username(db, form_data.username)
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=400, detail="Incorrect username or password")
+
+    # Only allow active accounts to log in!
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="User account not activated")
+
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.put("/users/{user_id}/activate")
+def activate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=403, detail="Only superusers can activate users"
+        )
+    user = db.query(DBUser).filter(DBUser.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.is_active = True
+    db.commit()
+    return {"detail": "User activated."}
 
 
 # Products endpoints (unchanged)
