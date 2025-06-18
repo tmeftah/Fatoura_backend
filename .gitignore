@@ -203,4 +203,4 @@ __marimo__/
 *.profile_default
 
 /data
-/db
+*.db
