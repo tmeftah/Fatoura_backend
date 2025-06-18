@@ -1,7 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import FileResponse
-from docxtpl import DocxTemplate, InlineImage
-from docx.shared import Mm
 from pydantic import BaseModel, Field
 import jinja2
 from datetime import datetime
@@ -21,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
 
@@ -37,9 +36,6 @@ jinja_env.filters["dateformat"] = format_date
 app = FastAPI()
 
 origins = [
-    "http://localhost",
-    "http://localhost:9000",
-    "http://192.168.178.35:9000",
     "*",
 ]
 
@@ -579,54 +575,6 @@ async def delete_invoice(invoice_id: int, db: Session = Depends(get_db)):
 
 
 # --- Invoice Generation ---
-invoice_template_path = "template.docx"
-logo_template_path = "logo.png"
-
-
-@app.post("/generate_invoice/{invoice_id}")
-async def generate_invoice(invoice_id: int, db: Session = Depends(get_db)):
-    try:
-        db_invoice = db.query(DBInvoice).filter(DBInvoice.id == invoice_id).first()
-        if not db_invoice:
-            raise HTTPException(status_code=404, detail="Invoice not found")
-
-        invoice = Invoice.from_orm(db_invoice)
-
-        items = [InvoiceItem.from_orm(item) for item in db_invoice.items]
-
-        doc = DocxTemplate(invoice_template_path)
-        try:
-            logo = InlineImage(doc, logo_template_path, width=Mm(40))
-        except FileNotFoundError:
-            logo = None
-
-        context = invoice.model_dump()
-
-        context["items"] = [item.model_dump() for item in items]
-
-        context["logo"] = logo
-
-        db_customer = (
-            db.query(DBCustomer).filter(DBCustomer.id == invoice.customer_id).first()
-        )
-        if db_customer:
-            customer = Customer.from_orm(db_customer)
-            context["customer"] = customer.model_dump()
-        else:
-            context["customer"] = None
-
-        doc.render(context, jinja_env)
-        output_file_path = f"generated_invoice_{invoice.invoice_number}.docx"
-        doc.save(output_file_path)
-
-        return FileResponse(
-            path=output_file_path,
-            filename=output_file_path,  # Set the desired filename for the download
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # Specify the correct MIME type
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/generate_invoice2/{invoice_id}")
