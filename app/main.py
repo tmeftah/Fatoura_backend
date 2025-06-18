@@ -5,7 +5,7 @@ import jinja2
 from datetime import datetime
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
-from .invoice_generator import ProfessionalInvoice
+from app.invoice_generator import ProfessionalInvoice
 
 
 # SQLAlchemy imports
