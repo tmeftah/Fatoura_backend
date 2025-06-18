@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-import jinja2
 from datetime import datetime
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,9 +28,6 @@ def format_date(value, format="%d-%m-%Y"):
     date = datetime.strptime(value, "%Y-%m-%d")
     return date.strftime(format)
 
-
-jinja_env = jinja2.Environment(extensions=[], trim_blocks=True, lstrip_blocks=True)
-jinja_env.filters["dateformat"] = format_date
 
 app = FastAPI()
 
