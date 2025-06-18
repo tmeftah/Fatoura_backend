@@ -1,9 +1,13 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+
 from app.invoice_generator import ProfessionalInvoice
 
 
@@ -23,10 +27,30 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
 
 
-def format_date(value, format="%d-%m-%Y"):
-    """Custom filter for date formatting.  Handles string inputs."""
-    date = datetime.strptime(value, "%Y-%m-%d")
-    return date.strftime(format)
+SECRET_KEY = "J7sn8fg"  # Change this for production!
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 app = FastAPI()
@@ -51,6 +75,17 @@ Base = declarative_base()
 
 
 # --- SQLAlchemy Models ---
+
+
+class DBUser(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)
+    email = Column(String, unique=True, index=True)
+    hashed_password = Column(String, nullable=False)
+    is_active = Column(Integer, default=1)
+
+
 class DBProduct(Base):
     __tablename__ = "products"
     id = Column(Integer, primary_key=True, index=True)
@@ -120,6 +155,24 @@ Base.metadata.create_all(bind=engine)
 
 
 # --- Pydantic Models ---
+
+
+class UserCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+
+
+class UserOut(BaseModel):
+    id: int
+    username: str
+    email: str
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
 class ProductBase(BaseModel):
     name: str
     description: Optional[str] = None
@@ -273,9 +326,66 @@ def get_db():
         db.close()
 
 
+def get_user_by_username(db: Session, username: str):
+    return db.query(DBUser).filter(DBUser.username == username).first()
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = get_user_by_username(db, username=username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+@app.post("/register/", response_model=UserOut)
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    db_user = get_user_by_username(db, user.username)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    hashed_password = get_password_hash(user.password)
+    db_user = DBUser(
+        username=user.username, email=user.email, hashed_password=hashed_password
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+
+@app.post("/login/")
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
+):
+    user = get_user_by_username(db, form_data.username)
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    access_token = create_access_token(data={"sub": user.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
 # Products endpoints (unchanged)
+
+
 @app.post("/products/", response_model=Product)
-async def create_product(product: ProductCreate, db: Session = Depends(get_db)):
+async def create_product(
+    product: ProductCreate,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     db_product = DBProduct(**product.model_dump())
     db.add(db_product)
     db.commit()
@@ -284,7 +394,11 @@ async def create_product(product: ProductCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/products/{product_id}", response_model=Product)
-async def read_product(product_id: int, db: Session = Depends(get_db)):
+async def read_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     db_product = db.query(DBProduct).filter(DBProduct.id == product_id).first()
     if db_product is None:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -292,13 +406,19 @@ async def read_product(product_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/products/", response_model=List[Product])
-async def list_products(db: Session = Depends(get_db)):
+async def list_products(
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     return db.query(DBProduct).all()
 
 
 @app.put("/products/{product_id}", response_model=Product)
 async def update_product(
-    product_id: int, product: ProductUpdate, db: Session = Depends(get_db)
+    product_id: int,
+    product: ProductUpdate,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
 ):
     db_product = db.query(DBProduct).filter(DBProduct.id == product_id).first()
     if db_product is None:
@@ -311,7 +431,11 @@ async def update_product(
 
 
 @app.delete("/products/{product_id}")
-async def delete_product(product_id: int, db: Session = Depends(get_db)):
+async def delete_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     db_product = db.query(DBProduct).filter(DBProduct.id == product_id).first()
     if db_product is None:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -322,7 +446,11 @@ async def delete_product(product_id: int, db: Session = Depends(get_db)):
 
 # Customers endpoints (unchanged)
 @app.post("/customers/", response_model=Customer)
-async def create_customer(customer: CustomerCreate, db: Session = Depends(get_db)):
+async def create_customer(
+    customer: CustomerCreate,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     db_customer = DBCustomer(**customer.model_dump())
     db.add(db_customer)
     db.commit()
@@ -331,7 +459,11 @@ async def create_customer(customer: CustomerCreate, db: Session = Depends(get_db
 
 
 @app.get("/customers/{customer_id}", response_model=Customer)
-async def read_customer(customer_id: int, db: Session = Depends(get_db)):
+async def read_customer(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     db_customer = db.query(DBCustomer).filter(DBCustomer.id == customer_id).first()
     if db_customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -339,13 +471,19 @@ async def read_customer(customer_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/customers/", response_model=List[Customer])
-async def list_customers(db: Session = Depends(get_db)):
+async def list_customers(
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     return db.query(DBCustomer).all()
 
 
 @app.put("/customers/{customer_id}", response_model=Customer)
 async def update_customer(
-    customer_id: int, customer: CustomerUpdate, db: Session = Depends(get_db)
+    customer_id: int,
+    customer: CustomerUpdate,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
 ):
     db_customer = db.query(DBCustomer).filter(DBCustomer.id == customer_id).first()
     if db_customer is None:
@@ -358,7 +496,11 @@ async def update_customer(
 
 
 @app.delete("/customers/{customer_id}")
-async def delete_customer(customer_id: int, db: Session = Depends(get_db)):
+async def delete_customer(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     db_customer = db.query(DBCustomer).filter(DBCustomer.id == customer_id).first()
     if db_customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -369,7 +511,11 @@ async def delete_customer(customer_id: int, db: Session = Depends(get_db)):
 
 # Settings endpoints (unchanged)
 @app.post("/settings/", response_model=Setting)
-async def create_setting(setting: SettingCreate, db: Session = Depends(get_db)):
+async def create_setting(
+    setting: SettingCreate,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     db_setting = DBSetting(**setting.model_dump())
     db.add(db_setting)
     try:
@@ -382,7 +528,11 @@ async def create_setting(setting: SettingCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/settings/{key}", response_model=Setting)
-async def read_setting(key: str, db: Session = Depends(get_db)):
+async def read_setting(
+    key: str,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     db_setting = db.query(DBSetting).filter(DBSetting.key == key).first()
     if db_setting is None:
         raise HTTPException(status_code=404, detail="Setting not found")
@@ -391,7 +541,10 @@ async def read_setting(key: str, db: Session = Depends(get_db)):
 
 @app.put("/settings/{key}", response_model=Setting)
 async def update_setting(
-    key: str, setting: SettingCreate, db: Session = Depends(get_db)
+    key: str,
+    setting: SettingCreate,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
 ):
     db_setting = db.query(DBSetting).filter(DBSetting.key == key).first()
     if db_setting is None:
@@ -404,7 +557,11 @@ async def update_setting(
 
 # Invoices endpoints
 @app.post("/invoices/", response_model=Invoice)
-async def create_invoice(invoice_data: InvoiceCreate, db: Session = Depends(get_db)):
+async def create_invoice(
+    invoice_data: InvoiceCreate,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     print(invoice_data)
     for item_data in invoice_data.items:
         product = (
@@ -461,7 +618,11 @@ async def create_invoice(invoice_data: InvoiceCreate, db: Session = Depends(get_
 
 
 @app.get("/invoices/{invoice_id}", response_model=Invoice)
-async def read_invoice(invoice_id: int, db: Session = Depends(get_db)):
+async def read_invoice(
+    invoice_id: int,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     db_invoice = (
         db.query(DBInvoice)
         .options(joinedload(DBInvoice.items).joinedload(DBInvoiceItem.product))
@@ -479,7 +640,10 @@ async def read_invoice(invoice_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/invoices/", response_model=List[Invoice])
-async def list_invoices(db: Session = Depends(get_db)):
+async def list_invoices(
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     invoices = (
         db.query(DBInvoice)
         .options(joinedload(DBInvoice.items).joinedload(DBInvoiceItem.product))
@@ -497,7 +661,10 @@ async def list_invoices(db: Session = Depends(get_db)):
 
 @app.put("/invoices/{invoice_id}", response_model=Invoice)
 async def update_invoice(
-    invoice_id: int, invoice: InvoiceUpdate, db: Session = Depends(get_db)
+    invoice_id: int,
+    invoice: InvoiceUpdate,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
 ):
     db_invoice = (
         db.query(DBInvoice)
@@ -560,21 +727,15 @@ async def update_invoice(
     return db_invoice
 
 
-@app.delete("/invoices/{invoice_id}")
-async def delete_invoice(invoice_id: int, db: Session = Depends(get_db)):
-    db_invoice = db.query(DBInvoice).filter(DBInvoice.id == invoice_id).first()
-    if db_invoice is None:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    db.delete(db_invoice)
-    db.commit()
-    return {"message": "Invoice deleted successfully"}
-
-
 # --- Invoice Generation ---
 
 
-@app.post("/generate_invoice2/{invoice_id}")
-async def generate_invoice2(invoice_id: int, db: Session = Depends(get_db)):
+@app.post("/generate_invoice/{invoice_id}")
+async def generate_invoice(
+    invoice_id: int,
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
     try:
         db_invoice = db.query(DBInvoice).filter(DBInvoice.id == invoice_id).first()
         if not db_invoice:
@@ -608,4 +769,4 @@ async def generate_invoice2(invoice_id: int, db: Session = Depends(get_db)):
 
 @app.get("/")
 async def read_root():
-    return {"message": "FastAPI Invoice Generator (SQLAlchemy)"}
+    return {"message": "Invoice Generator V1.0"}
