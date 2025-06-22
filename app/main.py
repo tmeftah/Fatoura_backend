@@ -143,6 +143,32 @@ class DBSetting(Base):
     __table_args__ = (UniqueConstraint("key", name="unique_setting_key"),)
 
 
+def create_default_settings():
+    db = SessionLocal()
+
+    settings = {
+        "company_name": "comp-1",
+        "company_address": "address of comp-1",
+        "company_telephone": "00010011",
+        "company_email": "email@email.email",
+        "currency_symbol": "TND",
+        "timbre_value": "1",
+        "footer_text": """Powered by Tech Solutions Inc.
+        www.techsolutions.come""",
+    }
+
+    for x, y in settings.items():
+        db_setting = DBSetting(key=x, value=y)
+        db.add(db_setting)
+        try:
+            db.commit()
+
+            db.close()
+
+        except Exception as e:
+            db.rollback()
+
+
 class DBCustomer(Base):
     __tablename__ = "customers"
     id = Column(Integer, primary_key=True, index=True)
@@ -177,6 +203,7 @@ def create_default_superuser():
 Base.metadata.create_all(bind=engine)
 
 create_default_superuser()
+create_default_settings()
 # --- Pydantic Models ---
 
 
@@ -335,6 +362,13 @@ class SettingCreate(SettingBase):
 
 
 class Setting(SettingBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+class Settings(SettingBase):
     id: int
 
     class Config:
@@ -574,6 +608,17 @@ async def create_setting(
         raise HTTPException(status_code=400, detail="Key already exists")
 
 
+@app.get("/settings/", response_model=List[Settings])
+async def read_settings(
+    db: Session = Depends(get_db),
+    current_user: DBUser = Depends(get_current_user),
+):
+    db_settings = db.query(DBSetting).all()
+    if db_settings is None:
+        raise HTTPException(status_code=404, detail="Settings not found")
+    return db_settings
+
+
 @app.get("/settings/{key}", response_model=Setting)
 async def read_setting(
     key: str,
@@ -788,12 +833,35 @@ async def generate_invoice(
         if not db_invoice:
             raise HTTPException(status_code=404, detail="Invoice not found")
 
+        company_name = (
+            db.query(DBSetting).filter(DBSetting.key == "company_name").first().value
+        )
+
+        company_address = (
+            db.query(DBSetting).filter(DBSetting.key == "company_address").first().value
+        )
+
+        company_telephone = (
+            db.query(DBSetting)
+            .filter(DBSetting.key == "company_telephone")
+            .first()
+            .value
+        )
+        company_email = (
+            db.query(DBSetting).filter(DBSetting.key == "company_email").first().value
+        )
+
+        footer_text = (
+            db.query(DBSetting).filter(DBSetting.key == "footer_text").first().value
+        )
+
         invoice = Invoice.from_orm(db_invoice)
         company_data = {
-            "name": "Tech Solutions Inc.",
-            "address": "456 Innovation Boulevard\nTech City, TX 75001\nUnited States",
-            "phone": "+1 (555) 123-4567",
-            "email": "billing@techsolutions.com",
+            "name": company_name,
+            "address": company_address,
+            "phone": company_telephone,
+            "email": company_email,
+            "footer_text": footer_text,
         }
 
         file_name = f"{invoice.invoice_number}.pdf"

@@ -138,11 +138,7 @@ class ProfessionalInvoice:
         c.setFillColor(colors.black)
 
         # Your desired multiline footer text:
-        footer_text = (
-            "Powered by Tech Solutions Inc.\n"
-            "www.techsolutions.com\n"
-            "Contact: info@techsolutions.com"
-        )
+        footer_text = self.company_data["footer_text"]
         lines = footer_text.replace("\t", "    ").splitlines()
 
         y = footer_y - 0.3 * inch  # Adjust as needed for vertical position
@@ -479,6 +475,7 @@ if __name__ == "__main__":
         "address": "456 Innovation Boulevard\nTech City, TX 75001\nUnited States",
         "phone": "+1 (555) 123-4567",
         "email": "billing@techsolutions.com",
+        "footer_text": "",
     }
 
     invoice_data = {

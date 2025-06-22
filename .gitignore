@@ -205,3 +205,4 @@ __marimo__/
 
 # Ignore all .db files everywhere in the repository
 *.db
+*.pdf
